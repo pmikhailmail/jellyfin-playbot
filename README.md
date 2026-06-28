@@ -67,12 +67,20 @@ Required Jellyfin environment variables:
 - `JELLYFIN_USER_NAME`
 - `JELLYFIN_API_KEY`
 
+Required TV environment variable:
+- `TV_IP`
+
+Conditionally required TV environment variable (for STEP 0 wake/WoL):
+- `TV_MAC`
+
 PowerShell example:
 
 ```powershell
 $env:JELLYFIN_SERVER_URL = "http://192.168.0.104:8899"
 $env:JELLYFIN_USER_NAME = "smarttv"
 $env:JELLYFIN_API_KEY = "<YOUR_JELLYFIN_API_KEY>"
+$env:TV_IP = "192.168.0.122"
+$env:TV_MAC = "2c:1b:3a:c3:d8:2d"
 ```
 
 ## Quick Start
@@ -81,15 +89,15 @@ Run from project root:
 
 ```powershell
 conda run -p .conda python jellyfin_request_to_playback.py `
-  --request "включи что-нибудь легкое на вечер" `
-  --ip 192.168.0.122
+  --request "включи что-нибудь легкое на вечер"
 ```
 
 ## Useful Flags
 
 `jellyfin_request_to_playback.py`:
 - `--request`: natural-language request (required)
-- `--ip`: TV IP address (required)
+- `--ip`: TV IP address override (default: `TV_IP`)
+- `--mac`: TV MAC override for WoL in STEP 0 (default: `TV_MAC`)
 - `--server-url`: Jellyfin server URL override (default: `JELLYFIN_SERVER_URL`)
 - `--jellyfin-token`: Jellyfin API key override (default: `JELLYFIN_API_KEY`)
 - `--username`: Jellyfin username override (default: `JELLYFIN_USER_NAME`)
@@ -112,6 +120,7 @@ A successful run includes logs like:
 - A `204` from `PlayNow` does not always mean immediate `NowPlaying` update.
 - Transient strict-confirmation failures are retried by orchestrator logic.
 - If TV session is already controllable, skipping STEP 0 helps preserve remote-control capability.
+- `TV_MAC`/`--mac` is required when STEP 0 runs (wake/ensure flow).
 
 ## Troubleshooting
 
