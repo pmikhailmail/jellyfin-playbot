@@ -24,6 +24,9 @@ One command runs a full pipeline:
 The single-entry script is:
 - `jellyfin_request_to_playback.py`
 
+Telegram bot entrypoint:
+- `telegram_bot.py`
+
 ## End-to-End Flow
 
 ### STEP 0: TV/App readiness
@@ -67,6 +70,9 @@ Required Jellyfin environment variables:
 - `JELLYFIN_USER_NAME`
 - `JELLYFIN_API_KEY`
 
+Required Telegram environment variable:
+- `TELEGRAM_BOT_TOKEN`
+
 Required TV environment variable:
 - `TV_IP`
 
@@ -79,8 +85,33 @@ PowerShell example:
 $env:JELLYFIN_SERVER_URL = "http://192.168.0.104:8899"
 $env:JELLYFIN_USER_NAME = "smarttv"
 $env:JELLYFIN_API_KEY = "<YOUR_JELLYFIN_API_KEY>"
+$env:TELEGRAM_BOT_TOKEN = "<YOUR_TELEGRAM_BOT_TOKEN>"
 $env:TV_IP = "192.168.0.122"
 $env:TV_MAC = "2c:1b:3a:c3:d8:2d"
+```
+
+## Telegram Bot
+
+Command format:
+- `/play <request>`
+
+Example:
+- `/play включи серию клиники про рождество`
+
+The bot runs `jellyfin_request_to_playback.py` for each `/play` request.
+
+## Docker
+
+Build and start bot:
+
+```powershell
+docker compose up --build -d
+```
+
+Stop bot:
+
+```powershell
+docker compose down
 ```
 
 ## Quick Start

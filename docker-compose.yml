@@ -1,0 +1,11 @@
+services:
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tv-jellyfin-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ${USERPROFILE}/.android:/root/.android
