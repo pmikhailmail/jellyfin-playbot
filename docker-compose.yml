@@ -8,4 +8,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ${USERPROFILE}/.android:/root/.android
+      - adb-state:/root/.android
+
+volumes:
+  adb-state:
