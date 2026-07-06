@@ -34,28 +34,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     logger.info("/start from chat_id=%s user_id=%s", update.effective_chat.id if update.effective_chat else None, update.effective_user.id if update.effective_user else None)
     await update.message.reply_text(
-        "Ready. Use /play <request>\n"
-        "Example: /play включи серию клиники про рождество"
+        "Ready. Just send your request directly.\n"
+        "Example: включи серию клиники про рождество"
     )
 
 
-async def play_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-
-    logger.info(
-        "/play received: chat_id=%s user_id=%s text=%r",
-        update.effective_chat.id if update.effective_chat else None,
-        update.effective_user.id if update.effective_user else None,
-        update.message.text,
-    )
-
-    request_text = _extract_request_text(update.message.text or "")
-    if not request_text:
-        logger.warning("/play without payload")
-        await update.message.reply_text("Usage: /play <request>")
-        return
-
+async def _run_playback(update: Update, request_text: str) -> None:
+    """Shared playback logic used by both /play command and plain text messages."""
     if not PLAYBACK_SCRIPT.exists():
         logger.error("Playback script missing: %s", PLAYBACK_SCRIPT)
         await update.message.reply_text(f"ERROR: script not found: {PLAYBACK_SCRIPT}")
@@ -77,15 +62,42 @@ async def play_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(f"Failed (code {proc.returncode}).\n\n{output}")
 
 
-async def text_probe_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def play_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
+
     logger.info(
-        "Text message (non-command): chat_id=%s user_id=%s text=%r",
+        "/play received: chat_id=%s user_id=%s text=%r",
         update.effective_chat.id if update.effective_chat else None,
         update.effective_user.id if update.effective_user else None,
         update.message.text,
     )
+
+    request_text = _extract_request_text(update.message.text or "")
+    if not request_text:
+        logger.warning("/play without payload")
+        await update.message.reply_text("Usage: /play <request>")
+        return
+
+    await _run_playback(update, request_text)
+
+
+async def text_probe_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    request_text = (update.message.text or "").strip()
+    if not request_text:
+        return
+
+    logger.info(
+        "Text message: chat_id=%s user_id=%s text=%r",
+        update.effective_chat.id if update.effective_chat else None,
+        update.effective_user.id if update.effective_user else None,
+        request_text,
+    )
+
+    await _run_playback(update, request_text)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
