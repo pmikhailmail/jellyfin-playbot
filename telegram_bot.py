@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import io
 import logging
 import os
 import subprocess
 import sys
 import traceback
 from pathlib import Path
+
+import openai
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -100,6 +103,47 @@ async def text_probe_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _run_playback(update, request_text)
 
 
+async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.voice:
+        return
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        await update.message.reply_text("ERROR: OPENAI_API_KEY not configured.")
+        return
+
+    logger.info(
+        "Voice message: chat_id=%s user_id=%s duration=%ss",
+        update.effective_chat.id if update.effective_chat else None,
+        update.effective_user.id if update.effective_user else None,
+        update.message.voice.duration,
+    )
+
+    await update.message.reply_text("\U0001f3a4 Распознаю голосовое...")
+
+    voice_file = await update.message.voice.get_file()
+    buf = io.BytesIO()
+    await voice_file.download_to_memory(buf)
+    buf.seek(0)
+    buf.name = "voice.ogg"  # openai client uses filename for format detection
+
+    client = openai.OpenAI(api_key=api_key)
+    transcription = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=buf,
+        language="ru",
+    )
+    request_text = transcription.text.strip()
+
+    if not request_text:
+        await update.message.reply_text("Не удалось распознать голосовое сообщение.")
+        return
+
+    logger.info("Voice transcribed: %r", request_text)
+    await update.message.reply_text(f"\U0001f4dd Распознано: {request_text}")
+    await _run_playback(update, request_text)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Unhandled exception in telegram bot: %s", context.error)
     logger.error("Traceback:\n%s", "".join(traceback.format_exception(None, context.error, context.error.__traceback__)) if context.error else "<no traceback>")
@@ -117,6 +161,7 @@ def main() -> int:
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("play", play_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_probe_handler))
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
     app.add_error_handler(error_handler)
 
     logger.info("Handlers registered. Entering polling loop.")
