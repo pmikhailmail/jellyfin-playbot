@@ -330,23 +330,6 @@ def main() -> int:
         item_id = resolved_item.get("item_id")
         title = resolved_item.get("title")
 
-        if status == "needs_clarification" and not item_id:
-            selected_media = payload.get("selected_media") or {}
-            if selected_media.get("type") == "series":
-                print("Resolver returned needs_clarification; trying keyword-based episode fallback...")
-                fallback_item_id, fallback_title = infer_episode_item_id(
-                    server_url=args.server_url,
-                    jellyfin_token=args.jellyfin_token,
-                    username=args.username,
-                    series_name=str(selected_media.get("name") or ""),
-                    series_id=str(selected_media.get("jellyfin_id") or ""),
-                    user_request=args.request,
-                    normalized_search_query=str(payload.get("normalized_search_query") or ""),
-                )
-                if fallback_item_id:
-                    item_id = fallback_item_id
-                    title = fallback_title
-
         if status != "ok" and not item_id:
             print(f"ERROR: Resolver status is '{status}', expected 'ok'.", file=sys.stderr)
             print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)

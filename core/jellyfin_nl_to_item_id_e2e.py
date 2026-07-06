@@ -203,6 +203,7 @@ def get_series_episode_candidates(
     token: str,
     user_id: str,
     series_id: str,
+    allowed_seasons: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     seasons = get_children(server_url, token, user_id, series_id, "Season")
     candidates: list[dict[str, Any]] = []
@@ -210,6 +211,8 @@ def get_series_episode_candidates(
         season_id = season.get("Id")
         season_number = season.get("IndexNumber")
         if not season_id or season_number is None:
+            continue
+        if allowed_seasons is not None and int(season_number) not in allowed_seasons:
             continue
         episodes = get_children(server_url, token, user_id, season_id, "Episode")
         for episode in episodes:
@@ -250,6 +253,111 @@ def select_media_via_llm(
 
 def build_details_url(server_url: str, item_id: str, server_id: str = DEFAULT_SERVER_ID) -> str:
     return f"{server_url}/web/#/details?id={item_id}&serverId={server_id}"
+
+
+def build_step_c1_constraints_prompt(user_request: str, series_name: str) -> str:
+    return (
+        "You process a verbal user request for an already selected TV series.\n"
+        "Your task is to categorize, extract, and formalize the request into exactly three categories:\n"
+        "1) seasons\n"
+        "2) episodes\n"
+        "3) remainder (all other useful non-structural constraints)\n"
+        "Return STRICT JSON only with keys: seasons, episodes, remainder.\n"
+        "Rules:\n"
+        "1) seasons and episodes must be arrays of integers, sorted ascending, unique.\n"
+        "2) Use [] when value is not explicitly or reasonably implied.\n"
+        "3) remainder must be string|null.\n"
+        "4) remainder contains all non-structural constraints and context: plot/theme, mood, character cues, qualifiers like 'funny', and any other useful text.\n"
+        "5) Use remainder=null only when request is purely structural (season/episode only).\n"
+        "6) Handle Russian/English ordinals and number words.\n"
+        "Valid examples:\n"
+        "{\"seasons\":[4],\"episodes\":[3],\"remainder\":null}\n"
+        "{\"seasons\":[4],\"episodes\":[],\"remainder\":\"christmas episode\"}\n"
+        "{\"seasons\":[1,2],\"episodes\":[],\"remainder\":\"funny episode\"}\n"
+        "{\"seasons\":[],\"episodes\":[],\"remainder\":\"where janitor wedding happens\"}\n\n"
+        f"Selected series: {series_name}\n"
+        f"User request: {user_request}\n"
+    )
+
+
+def normalize_int_list(value: Any, field_name: str) -> list[int]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise PipelineError(f"Invalid {field_name}: expected array")
+    out: list[int] = []
+    for item in value:
+        parsed = to_int_or_none(item, field_name)
+        if parsed is None:
+            continue
+        if parsed <= 0:
+            continue
+        out.append(parsed)
+    return sorted(set(out))
+
+
+def compute_overview_truncation_stats(
+    episode_candidates: list[dict[str, Any]],
+    overview_max_chars: int,
+) -> dict[str, Any]:
+    total = len(episode_candidates)
+    if total == 0:
+        return {
+            "overview_max_chars": overview_max_chars,
+            "episodes_total": 0,
+            "episodes_with_overview": 0,
+            "episodes_truncated": 0,
+            "total_chars_removed": 0,
+            "avg_chars_removed_per_truncated": 0.0,
+            "max_chars_removed_single_episode": 0,
+        }
+
+    with_overview = 0
+    truncated = 0
+    total_removed = 0
+    max_removed = 0
+
+    for candidate in episode_candidates:
+        overview = str(candidate.get("overview") or "")
+        compact = " ".join(overview.split())
+        if not compact:
+            continue
+        with_overview += 1
+        if len(compact) <= overview_max_chars:
+            continue
+
+        prefix = compact[: overview_max_chars - 1].rstrip()
+        removed = len(compact) - len(prefix)
+        truncated += 1
+        total_removed += removed
+        if removed > max_removed:
+            max_removed = removed
+
+    avg_removed = (total_removed / truncated) if truncated else 0.0
+    return {
+        "overview_max_chars": overview_max_chars,
+        "episodes_total": total,
+        "episodes_with_overview": with_overview,
+        "episodes_truncated": truncated,
+        "total_chars_removed": total_removed,
+        "avg_chars_removed_per_truncated": round(avg_removed, 2),
+        "max_chars_removed_single_episode": max_removed,
+    }
+
+
+def compute_dynamic_overview_max_chars(
+    season_filter: list[int],
+    fallback_overview_max_chars: int,
+    single_season_max_chars: int = 400,
+    per_extra_season_penalty: int = 20,
+    min_overview_max_chars: int = 240,
+) -> int:
+    if not season_filter:
+        return fallback_overview_max_chars
+
+    season_count = len(set(season_filter))
+    dynamic_value = single_season_max_chars - per_extra_season_penalty * (season_count - 1)
+    return max(min_overview_max_chars, dynamic_value)
 
 
 def to_bool_or_none(value: Any) -> bool | None:
@@ -429,25 +537,95 @@ def run_pipeline(
         result["status"] = "ok"
         return result
 
-    # Step C
+    # Step C1: extract structural constraints from user request.
+    step_c1_prompt = build_step_c1_constraints_prompt(user_request, selected["name"])
+    if dump_prompts:
+        print("=== LLM PROMPT: EXTRACT_EPISODE_CONSTRAINTS ===")
+        print(step_c1_prompt)
+    step_c1_raw = post_openai_json(openai_api_key, openai_model_normalize, step_c1_prompt, 0.0)
+    step_c1_obj = parse_json_object(step_c1_raw)
+    result["raw_llm"]["extract_episode_constraints"] = step_c1_obj
+
+    extracted_seasons = normalize_int_list(step_c1_obj.get("seasons"), "seasons")
+    extracted_episodes = normalize_int_list(step_c1_obj.get("episodes"), "episodes")
+    remainder_raw = step_c1_obj.get("remainder")
+    if remainder_raw is None:
+        remainder: str | None = None
+    elif isinstance(remainder_raw, str):
+        remainder = remainder_raw.strip() or None
+    else:
+        raise PipelineError("Invalid remainder: expected string|null")
+
+    result["episode_constraints"] = {
+        "seasons": extracted_seasons,
+        "episodes": extracted_episodes,
+        "remainder": remainder,
+    }
+
+    # If both season and episode are unambiguous, resolve directly.
+    if len(extracted_seasons) == 1 and len(extracted_episodes) == 1:
+        try:
+            item = resolve_series_episode_item(
+                server_url,
+                jellyfin_token,
+                user_id,
+                selected["name"],
+                extracted_seasons[0],
+                extracted_episodes[0],
+            )
+            result["series_resolution"] = {
+                "season": extracted_seasons[0],
+                "episode": extracted_episodes[0],
+                "source": "direct_constraints",
+            }
+            result["resolved_item"] = {
+                "item_id": item.get("Id"),
+                "title": item.get("Name"),
+                "details_url": build_details_url(server_url, item.get("Id")),
+            }
+            result["status"] = "ok"
+            return result
+        except PipelineError:
+            result["direct_constraints_fallback"] = True
+
+    # Step C2
     search_question = build_search_question(selected["name"], search_query)
+    effective_overview_max_chars = compute_dynamic_overview_max_chars(
+        extracted_seasons,
+        episode_overview_max_chars,
+    )
     episode_candidates: list[dict[str, Any]] | None = None
-    if use_episode_metadata:
+    should_include_episode_metadata = use_episode_metadata or bool(extracted_seasons)
+    if should_include_episode_metadata:
+        allowed_seasons = set(extracted_seasons) if extracted_seasons else None
         episode_candidates = get_series_episode_candidates(
             server_url,
             jellyfin_token,
             user_id,
             selected["id"],
+            allowed_seasons=allowed_seasons,
         )
         result["episode_metadata"] = {
             "enabled": True,
             "candidates_count": len(episode_candidates),
+            "season_filter": extracted_seasons,
+            "overview_max_chars_configured": episode_overview_max_chars,
+            "overview_max_chars_effective": effective_overview_max_chars,
+            "overview_truncation": compute_overview_truncation_stats(
+                episode_candidates,
+                effective_overview_max_chars,
+            ),
         }
+    elif not extracted_seasons:
+        result["episode_resolution_note"] = (
+            "No season constraints; using broad episode resolution which may degrade quality "
+            "for long series (lost-in-the-middle)."
+        )
 
     step_c_prompt = build_series_episode_prompt(
         search_question,
         episode_candidates=episode_candidates,
-        overview_max_chars=episode_overview_max_chars,
+        overview_max_chars=effective_overview_max_chars,
     )
     if dump_prompts:
         print("=== LLM PROMPT: RESOLVE_EPISODE ===")
@@ -520,7 +698,7 @@ def main() -> int:
     parser.add_argument(
         "--episode-overview-max-chars",
         type=int,
-        default=220,
+        default=350,
         help="Max chars per episode overview included in prompt",
     )
     parser.add_argument("--output", default="", help="Optional JSON output file path")

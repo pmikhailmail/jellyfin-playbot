@@ -11,6 +11,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_ROOT / "core" / "jellyfin_nl_to_item_id_e2e.py"
 DOTENV_PATH = PROJECT_ROOT / ".env"
+LIVE_OUTPUT_ENV = "JELLYFIN_TEST_LIVE_OUTPUT"
 
 
 TEST_CASES: list[dict[str, Any]] = [
@@ -58,6 +59,22 @@ TEST_CASES: list[dict[str, Any]] = [
         "expected_episode": 14,
         "expected_resolved_title": "The Carpet",
     },
+    {
+        "name": "the_office_explicit_s05e06",
+        "request": "включи 6 серию 5 сезона офиса",
+        "expected_media_type": "series",
+        "expected_media_name": "The Office",
+        "expected_season": 5,
+        "expected_episode": 6,
+        "expected_resolved_title": "Customer Survey",
+    },
+    {
+        "name": "scrubs_any_episode_season5",
+        "request": "включи какую нибудь серию из 5 сезона клиники",
+        "expected_media_type": "series",
+        "expected_media_name": "Scrubs",
+        "expected_season": 5,
+    },
 ]
 
 
@@ -95,6 +112,9 @@ class JellyfinNLToItemIdE2ETest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.base_env = os.environ.copy()
         cls.base_env.update(_load_dotenv(DOTENV_PATH))
+        # Ensure child Python processes print UTF-8 in live mode.
+        cls.base_env.setdefault("PYTHONIOENCODING", "utf-8")
+        cls.base_env.setdefault("PYTHONUTF8", "1")
 
         required = [
             "OPENAI_API_KEY",
@@ -115,15 +135,41 @@ class JellyfinNLToItemIdE2ETest(unittest.TestCase):
             "--use-episode-metadata",
             "--pretty",
         ]
-        proc = subprocess.run(
-            cmd,
-            cwd=str(PROJECT_ROOT),
-            env=self.base_env,
-            text=True,
-            capture_output=True,
-            timeout=180,
-            check=False,
-        )
+        live_output = os.getenv(LIVE_OUTPUT_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+        if live_output:
+            print(f"\n--- Running resolver for request: {request}")
+            proc = subprocess.run(
+                cmd,
+                cwd=str(PROJECT_ROOT),
+                env=self.base_env,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+            if proc.stdout:
+                print(proc.stdout)
+            if proc.stderr:
+                print(proc.stderr, file=sys.stderr)
+            if proc.returncode != 0:
+                raise AssertionError(
+                    "Resolver script failed.\n"
+                    f"Command: {' '.join(cmd)}\n"
+                    f"Exit code: {proc.returncode}"
+                )
+        else:
+            proc = subprocess.run(
+                cmd,
+                cwd=str(PROJECT_ROOT),
+                env=self.base_env,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
         if proc.returncode != 0:
             raise AssertionError(
                 "Resolver script failed.\n"
@@ -139,8 +185,10 @@ class JellyfinNLToItemIdE2ETest(unittest.TestCase):
     def test_queries_resolve_expected_media(self) -> None:
         for case in TEST_CASES:
             with self.subTest(case=case["name"]):
+                print(f"\n=== CASE: {case['name']}")
                 payload = self._run_case(case["request"])
-                self.assertEqual(payload.get("status"), "ok", payload)
+                expected_status = case.get("expected_status", "ok")
+                self.assertEqual(payload.get("status"), expected_status, payload)
 
                 selected_media = payload.get("selected_media") or {}
                 self.assertEqual(selected_media.get("type"), case["expected_media_type"], payload)
@@ -151,7 +199,12 @@ class JellyfinNLToItemIdE2ETest(unittest.TestCase):
                     season = series_resolution.get("season")
                     episode = series_resolution.get("episode")
                     self.assertIsInstance(season, int, payload)
-                    self.assertIsInstance(episode, int, payload)
+
+                    expected_episode_null = bool(case.get("expected_episode_null", False))
+                    if expected_episode_null:
+                        self.assertIsNone(episode, payload)
+                    else:
+                        self.assertIsInstance(episode, int, payload)
 
                     expected_options = case.get("expected_episode_options")
                     if expected_options is not None:
@@ -175,7 +228,9 @@ class JellyfinNLToItemIdE2ETest(unittest.TestCase):
                         self.assertGreaterEqual(season, min_season, payload)
                         self.assertLessEqual(season, max_season, payload)
 
-                    if expected_episode is not None:
+                    if expected_episode_null:
+                        self.assertIsNone(episode, payload)
+                    elif expected_episode is not None:
                         self.assertEqual(episode, expected_episode, payload)
                     else:
                         self.assertGreater(episode, 0, payload)
