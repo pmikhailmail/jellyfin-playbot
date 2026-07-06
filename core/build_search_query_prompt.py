@@ -22,7 +22,8 @@ def build_prompt(user_request: str) -> str:
         "You are given the original user command in conversational form.\n\n"
         "Task:\n"
         "1) Remove action verbs and command filler words (for example: play, start, put on, please).\n"
-        "2) Keep only search intent: media title + important plot hints.\n"
+        "2) Keep only search intent: media title + important plot hints + episode selection qualifiers.\n"
+        "   Preserve qualifiers like 'any episode', 'random', 'some episode' (translate as 'any episode').\n"
         "3) Fix obvious typos and normalize wording for search.\n"
         "4) The output search_query MUST be in English.\n"
         "5) For movie/series names, do not do a literal translation. Use the canonical English title"
@@ -41,6 +42,8 @@ def build_prompt(user_request: str) -> str:
         "Output: {\"search_query\":\"Gravity Falls Mermando pool episode\"}\n\n"
         "Input: включи серию как это работает про туалетную бумагу\n"
         "Output: {\"search_query\":\"How It's Made toilet paper episode\"}\n\n"
+        "Input: включи какую нибудь серию из 5 сезона клиники\n"
+        "Output: {\"search_query\":\"Scrubs season 5 any episode\"}\n\n"
         "Original user command:\n"
         f"{user_request}\n"
     )

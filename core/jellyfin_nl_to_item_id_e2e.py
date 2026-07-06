@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import random
 import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -268,10 +269,16 @@ def build_step_c1_constraints_prompt(user_request: str, series_name: str) -> str
         "2) Use [] when value is not explicitly or reasonably implied.\n"
         "3) remainder must be string|null.\n"
         "4) remainder contains all non-structural constraints and context: plot/theme, mood, character cues, qualifiers like 'funny', and any other useful text.\n"
-        "5) Use remainder=null only when request is purely structural (season/episode only).\n"
+        "5) Use remainder=null only when request is purely structural (season/episode only, including random/any selectors).\n"
         "6) Handle Russian/English ordinals and number words.\n"
+        "7) Use the special value -1 to mean 'any/random' when the user explicitly asks for a random or unspecified episode or season.\n"
+        "   Use [-1] in episodes when the user wants any episode from a specified season (e.g. 'any episode', 'random episode', 'some episode', 'любую серию', 'какую нибудь серию').\n"
+        "   Use [-1] in seasons when the user wants a specific episode from any season (e.g. 'random season').\n"
+        "   Use [] (empty) when the user does not mention season/episode at all.\n"
         "Valid examples:\n"
         "{\"seasons\":[4],\"episodes\":[3],\"remainder\":null}\n"
+        "{\"seasons\":[4],\"episodes\":[-1],\"remainder\":null}\n"
+        "{\"seasons\":[-1],\"episodes\":[5],\"remainder\":null}\n"
         "{\"seasons\":[4],\"episodes\":[],\"remainder\":\"christmas episode\"}\n"
         "{\"seasons\":[1,2],\"episodes\":[],\"remainder\":\"funny episode\"}\n"
         "{\"seasons\":[],\"episodes\":[],\"remainder\":\"where janitor wedding happens\"}\n\n"
@@ -290,7 +297,7 @@ def normalize_int_list(value: Any, field_name: str) -> list[int]:
         parsed = to_int_or_none(item, field_name)
         if parsed is None:
             continue
-        if parsed <= 0:
+        if parsed <= 0 and parsed != -1:  # -1 is the "any/random" sentinel
             continue
         out.append(parsed)
     return sorted(set(out))
@@ -537,8 +544,8 @@ def run_pipeline(
         result["status"] = "ok"
         return result
 
-    # Step C1: extract structural constraints from user request.
-    step_c1_prompt = build_step_c1_constraints_prompt(user_request, selected["name"])
+    # Step C1: extract structural constraints from normalized search query.
+    step_c1_prompt = build_step_c1_constraints_prompt(search_query, selected["name"])
     if dump_prompts:
         print("=== LLM PROMPT: EXTRACT_EPISODE_CONSTRAINTS ===")
         print(step_c1_prompt)
@@ -561,6 +568,35 @@ def run_pipeline(
         "episodes": extracted_episodes,
         "remainder": remainder,
     }
+
+    # Handle random/any sentinel (-1): pick a random episode from matching candidates.
+    has_random_episode = -1 in extracted_episodes
+    has_random_season = -1 in extracted_seasons
+    if has_random_episode or has_random_season:
+        real_seasons = [s for s in extracted_seasons if s != -1]
+        allowed_seasons = set(real_seasons) if real_seasons and not has_random_season else None
+        random_candidates = get_series_episode_candidates(
+            server_url, jellyfin_token, user_id, selected["id"],
+            allowed_seasons=allowed_seasons,
+        )
+        if has_random_season and not has_random_episode:
+            real_episodes = set(e for e in extracted_episodes if e != -1)
+            random_candidates = [c for c in random_candidates if c["episode"] in real_episodes]
+        if not random_candidates:
+            result["status"] = "needs_clarification"
+            return result
+        chosen = random.choice(random_candidates)
+        season_num = int(chosen["season"])
+        episode_num = int(chosen["episode"])
+        result["series_resolution"] = {"season": season_num, "episode": episode_num, "source": "random_selection"}
+        item = resolve_series_episode_item(server_url, jellyfin_token, user_id, selected["name"], season_num, episode_num)
+        result["resolved_item"] = {
+            "item_id": item.get("Id"),
+            "title": item.get("Name"),
+            "details_url": build_details_url(server_url, item.get("Id")),
+        }
+        result["status"] = "ok"
+        return result
 
     # If both season and episode are unambiguous, resolve directly.
     if len(extracted_seasons) == 1 and len(extracted_episodes) == 1:
